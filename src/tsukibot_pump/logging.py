@@ -6,6 +6,7 @@ cover Solana / pump-bot specific names (hot wallet secret, RPC tokens).
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import logging.handlers
 import sys
@@ -84,10 +85,8 @@ def configure_logging(
         root.removeHandler(h)
         # Close file handles so repeated re-configuration (e.g. across tests)
         # doesn't leak open fds; harmless for stream handlers.
-        try:
+        with contextlib.suppress(Exception):
             h.close()
-        except Exception:  # noqa: BLE001
-            pass
 
     if state_dir is not None:
         state_dir.mkdir(parents=True, exist_ok=True)
