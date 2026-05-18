@@ -1,0 +1,20 @@
+# tsuki-pump-bot — KOL leaderboard
+#
+# Format: wallet,label,score
+#   wallet — base58 Solana pubkey
+#   label  — short human-readable name (any string, no commas)
+#   score  — 0-100 KOL quality weight (higher = better)
+#
+# The "secret" KOL list quality IS the edge — wallets that appear in public
+# Cielo/Nansen dashboards are already front-run.
+#
+# Recommended sourcing strategy (manual review required):
+#   1. Pull top-PnL wallets from Solscan / Cielo for the last 90 days
+#   2. Cross-check on Birdeye / DexScreener for survivorship (must still be
+#      profitable in the most recent 30d, not just historically)
+#   3. Verify win rate >55% on at least 50 trades
+#   4. Exclude any wallet that publicly leaderboards itself (Twitter brag tells)
+#
+# Demo entries (clearly fake, do NOT use as real KOLs):
+# KOL_DEMOaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,demo_top_kol,90
+# KOL_DEMObbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb,demo_mid_kol,60

@@ -1,0 +1,20 @@
+# tsuki-pump-bot — seed scammer wallet blacklist
+#
+# Format: one base58 Solana pubkey per line. Optional second comma-separated
+# field with a short note (ignored by the loader, kept for human review).
+# Lines starting with '#' are comments.
+#
+# Add your own entries here. The list is intentionally short out-of-the-box
+# because (a) a comprehensive public blacklist would need ongoing curation
+# we can't promise to maintain, and (b) the highest-signal entries are
+# usually wallets *you* personally watched rug a friend — those go here.
+#
+# Recommended sources to seed from (manual review required, do NOT auto-import):
+#   - AllenHark public DB (~6k wallets, mixed quality)
+#   - DeFade scam-token explorer
+#   - SolSniffer's flagged-dev list
+#   - Your own losses :)
+#
+# Demo entry (clearly fake, intentionally invalid checksum so we don't
+# accidentally flag a real wallet):
+# DEMOaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, example serial rugger

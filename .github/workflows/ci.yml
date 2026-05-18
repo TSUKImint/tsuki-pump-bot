@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  push:
+    branches: [main, bootstrap-base]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lint-type-test:
+    name: ruff + mypy + pytest
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        run: curl -LsSf https://astral.sh/uv/install.sh | sh
+
+      - name: Show tool versions
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          echo "::group::versions"
+          python --version
+          uv --version
+          which python
+          which uv
+          echo "::endgroup::"
+
+      - name: Sync dependencies
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          uv venv
+          uv pip install -e ".[dev]"
+          source .venv/bin/activate
+          ruff --version
+          mypy --version
+          pytest --version
+
+      - name: Ruff lint
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          source .venv/bin/activate
+          ruff check . 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"
+          ruff format --check . 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Mypy type-check
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          source .venv/bin/activate
+          mypy src 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Pytest
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          source .venv/bin/activate
+          pytest --cov=tsukibot_pump --cov-report=term-missing -v 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"
