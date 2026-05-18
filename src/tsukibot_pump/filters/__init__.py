@@ -8,6 +8,7 @@ individually via config.
 
 from .bundle_detector import BundleDetector
 from .convergence import ConvergenceDetector
+from .creator_vault import CreatorVaultFilter
 from .cto_detector import CtoDetector
 from .curve_predictor import CurvePredictor
 from .dev_blacklist import DevBlacklist
@@ -16,6 +17,7 @@ from .first_kol_touch import FirstKolTouch
 __all__ = [
     "BundleDetector",
     "ConvergenceDetector",
+    "CreatorVaultFilter",
     "CtoDetector",
     "CurvePredictor",
     "DevBlacklist",

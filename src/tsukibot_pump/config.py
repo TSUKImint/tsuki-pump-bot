@@ -47,6 +47,10 @@ class Settings(BaseSettings):
     solana_devnet_rpc_url: str = "https://api.devnet.solana.com"
     solana_grpc_url: str = ""
     solana_grpc_token: str = ""
+    # Optional Helius WebSocket URL. When set we use logsSubscribe for the
+    # firehose (~200 ms latency on Helius free tier) instead of HTTP polling.
+    # Format: wss://mainnet.helius-rpc.com/?api-key=<KEY>
+    helius_ws_url: str = ""
 
     # Hot wallet secret (only required for devnet / mainnet modes).
     solana_hot_wallet_secret: str = ""
@@ -107,6 +111,9 @@ class ScoringWeights(BaseModel):
     convergence: float = Field(ge=0, le=1)
     curve_graduation: float = Field(ge=0, le=1)
     cto_revival: float = Field(ge=0, le=1)
+    # New (v0.3): creator-vault alignment (May 2025 protocol upgrade).
+    # Optional; defaults to 0 so v0.2 configs keep working unchanged.
+    creator_vault: float = Field(default=0.0, ge=0, le=1)
 
     @model_validator(mode="after")
     def _weights_sum_to_one(self) -> ScoringWeights:
@@ -117,16 +124,71 @@ class ScoringWeights(BaseModel):
             + self.convergence
             + self.curve_graduation
             + self.cto_revival
+            + self.creator_vault
         )
         if abs(total - 1.0) > 1e-6:
             raise ValueError(f"scoring.weights must sum to 1.0 (got {total:.6f})")
         return self
 
 
+class AggressiveProfileConfig(BaseModel):
+    """v0.3 opt-in aggressive paper profile.
+
+    Single boolean knob in YAML. When `enabled=True`, the orchestrator
+    applies the listed overrides to scoring / sizing / curve / watch / paper
+    realism. Implemented as a structured override (not a free-form patch)
+    so the user can audit exactly what changes vs the defaults.
+    """
+
+    enabled: bool = False
+    # Score gate (replaces scoring.enter_threshold when enabled).
+    enter_threshold: float = Field(default=40.0, ge=0, le=100)
+    # Sizing override (replaces sizing.fraction_of_kelly).
+    fraction_of_kelly: float = Field(default=0.50, gt=0, le=1)
+    # Sizing override (replaces sizing.min_expected_roi).
+    min_expected_roi: float = Field(default=0.10, ge=0)
+    # Bankroll override (replaces bankroll.single_token_cap_fraction).
+    single_token_cap_fraction: float = Field(default=0.10, gt=0, le=1)
+    # Curve filter override (replaces curve_graduation.enter_after_sol_in_curve_gte).
+    enter_after_sol_in_curve_gte: float = Field(default=25.0, ge=0)
+    # Curve filter override (replaces curve_graduation.min_velocity_sol_per_min).
+    min_velocity_sol_per_min: float = Field(default=0.2, ge=0)
+    # Watch override (replaces watch.http_poll_interval_seconds).
+    http_poll_interval_seconds: float = Field(default=1.5, gt=0)
+    # Scoring loop cadence (replaces hard-coded 5.0s in __main__).
+    scoring_cycle_seconds: float = Field(default=2.5, gt=0)
+
+
+class EarlyConvictionConfig(BaseModel):
+    """v0.3 early-conviction lane.
+
+    Bypasses the curve_graduation gate when *both* (a) >= min_kol_touches
+    tracked KOLs touch the token within `window_seconds` of CREATE *and*
+    (b) the creator has at least `min_prior_graduations` prior graduations.
+    Size is still capped by the single_token_cap to keep blast-radius
+    bounded if the call is wrong.
+    """
+
+    enabled: bool = False
+    window_seconds: int = Field(default=30, ge=1)
+    min_kol_touches: int = Field(default=2, ge=1)
+    min_prior_graduations: int = Field(default=1, ge=0)
+    # When the lane fires, cap notional at this fraction of bankroll. Hard
+    # safety floor so a misfire can't blow the whole account.
+    max_single_token_cap_fraction: float = Field(default=0.05, gt=0, le=1)
+
+
 class ScoringConfig(BaseModel):
     enter_threshold: float = Field(ge=0, le=100)
     enter_threshold_watchtower_log: float = Field(ge=0, le=100)
     weights: ScoringWeights
+    # Scoring mode. "weighted" = classic v0.2 weighted-sum composite scorer.
+    # "graduation_probability" = v0.3 Lillo-Naviglio-style logistic scorer.
+    # See `tsukibot_pump.scoring.GraduationProbabilityScorer` for math.
+    mode: Literal["weighted", "graduation_probability"] = "weighted"
+    # v0.3 profiles (opt-in).
+    aggressive_paper: AggressiveProfileConfig = Field(default_factory=AggressiveProfileConfig)
+    early_conviction: EarlyConvictionConfig = Field(default_factory=EarlyConvictionConfig)
 
 
 class DevBlacklistConfig(BaseModel):
@@ -174,6 +236,30 @@ class CtoRevivalConfig(BaseModel):
     min_days_since_launch: int = Field(ge=1)
 
 
+class CreatorVaultConfig(BaseModel):
+    """Filter 7 (v0.3) — creator-vault alignment.
+
+    Uses the May 2025 pump.fun protocol upgrade: every trade routes 30 bps to
+    the token's creator vault PDA, and the BondingCurve account now carries a
+    `creator` field. An aligned creator (vault balance > 0 AND prior
+    graduation history) is an under-priced positive signal; a creator with
+    no graduations and rapid-fire mint behavior is a red flag handled by
+    `dev_blacklist`.
+    """
+
+    enabled: bool = False
+    # Bonus to the filter score when the creator has at least this many
+    # tokens that previously graduated (counted via local event_store).
+    min_prior_graduations_for_bonus: int = Field(default=1, ge=0)
+    # Penalty when creator has launched many tokens but graduated zero.
+    suspect_if_dev_token_count_7d_gte: int = Field(default=25, ge=1)
+    # The filter never hard-rejects; it nudges score up/down. Score floor
+    # / ceiling pinned here so the orchestrator can reason about bounds.
+    score_aligned: float = Field(default=80.0, ge=0, le=100)
+    score_anonymous: float = Field(default=50.0, ge=0, le=100)
+    score_suspect: float = Field(default=20.0, ge=0, le=100)
+
+
 class FiltersConfig(BaseModel):
     dev_blacklist: DevBlacklistConfig
     bundle_cluster: BundleClusterConfig
@@ -181,6 +267,8 @@ class FiltersConfig(BaseModel):
     convergence: ConvergenceConfig
     curve_graduation: CurveGraduationConfig
     cto_revival: CtoRevivalConfig
+    # v0.3 addition; optional so older YAMLs still load.
+    creator_vault: CreatorVaultConfig = Field(default_factory=CreatorVaultConfig)
 
 
 class PaperRealismConfig(BaseModel):
@@ -194,7 +282,9 @@ class PaperRealismConfig(BaseModel):
 
     enabled: bool = False
     # Pump.fun protocol fee (bps of notional, applied on every buy and sell).
-    pump_fee_bps: float = Field(default=100.0, ge=0, le=10_000)
+    # 125 bps = 95 bps protocol + 30 bps creator vault, per pump.fun's
+    # official fee schedule effective 7 Oct 2025.
+    pump_fee_bps: float = Field(default=125.0, ge=0, le=10_000)
     # Independent priority fee (in lamports of SOL, added to buy cost / deducted
     # from sell proceeds — separate from the priority_fee_micro_lamports knob
     # used by the live executor planner).
@@ -253,6 +343,10 @@ class WatchConfig(BaseModel):
     use_grpc_if_available: bool
     http_poll_interval_seconds: float = Field(gt=0)
     max_token_age_seconds_on_first_sight: float = Field(gt=0)
+    # v0.3: when True and SOLANA_HELIUS_WS_URL is set in env, prefer the
+    # Helius logsSubscribe WebSocket transport (~200 ms) over HTTP polling.
+    # Auto-falls back to HTTP on connection error.
+    use_helius_ws_if_available: bool = True
 
 
 class NetworkConfig(BaseModel):

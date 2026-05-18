@@ -54,6 +54,16 @@ class TokenState:
     last_sol_velocity_sol_per_min: float = 0.0
     curve_complete: bool = False
     last_price_sol_per_token: float = 0.0
+    # Optional on-chain bonding curve address (set by aggregator when known).
+    bonding_curve_address: str | None = None
+
+    # v0.3: from the BondingCurve.creator field (May 2025 protocol upgrade).
+    # Distinct from dev_wallet (the transaction signer of CREATE) — usually
+    # but not always the same pubkey. Used by the creator-vault filter.
+    creator: str | None = None
+    creator_vault_sol: float = 0.0
+    creator_prior_graduations: int = 0
+    creator_tokens_7d: int = 0
 
     # Buyer behavior
     buys: list[BuyRecord] = field(default_factory=list)
