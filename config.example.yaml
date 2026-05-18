@@ -26,14 +26,23 @@ sizing:
 
 # ── Scoring threshold ─────────────────────────────────────────────────────
 scoring:
+  # v0.3: which scorer to use.
+  #   "weighted"               — v0.2 weighted-sum (legacy, deterministic)
+  #   "graduation_probability" — v0.3 Lillo-Naviglio P(graduate|state) scorer
+  #     based on arXiv:2602.14860 (Marino, Naviglio, Tarantelli, Lillo,
+  #     Feb 2026; Università di Pisa / Scuola Normale / Bologna).
+  mode: "weighted"
+
   # Composite score in [0, 100]. We enter a paper position only when score
-  # is at or above this gate.
+  # is at or above this gate. For mode="graduation_probability" this is the
+  # P(graduate) percentage (e.g. 40 == 40% predicted graduation chance).
   enter_threshold: 60
   # In watchtower mode we still log everything; this only gates the paper
   # executor.
   enter_threshold_watchtower_log: 40
 
   # Individual filter weights (must sum to 1.0).
+  # Only used when mode="weighted".
   weights:
     dev_blacklist: 0.20                # negative-only filter, hard-fails if rugger
     bundle_cluster: 0.15
@@ -41,6 +50,36 @@ scoring:
     convergence: 0.15
     curve_graduation: 0.20
     cto_revival: 0.10
+    creator_vault: 0.00                # v0.3 filter; default-disabled in weighted mode
+
+  # v0.3 aggressive paper-trader profile. Off by default — the bot stays
+  # conservative until you opt in. When `enabled: true`, these knobs
+  # OVERRIDE the corresponding fields elsewhere in this file (sizing,
+  # bankroll cap, curve filter, poll interval) at startup. Logged once on
+  # boot so you can confirm the effective values.
+  aggressive_paper:
+    enabled: false
+    enter_threshold: 40                # was 60 — react earlier
+    fraction_of_kelly: 0.50            # was 0.20 — half-Kelly, not quarter
+    min_expected_roi: 0.10             # was 0.30 — accept thinner edges
+    single_token_cap_fraction: 0.10    # was 0.05 — bigger per-token swings
+    enter_after_sol_in_curve_gte: 25.0 # was 65 — enter earlier on the curve
+    min_velocity_sol_per_min: 0.2      # was 0.5 — accept slower acceleration
+    http_poll_interval_seconds: 1.5    # was 5 — poll faster (no-op w/ Helius WS)
+    scoring_cycle_seconds: 2.5         # was 5 — score & enter twice as often
+
+  # v0.3 early-conviction lane. When ON, a token is paper-bought even when
+  # the curve filter would reject, IF (a) the on-chain creator has prior
+  # graduations AND (b) >= min_kol_touches distinct tracked KOLs bought
+  # within `window_seconds` of CREATE. The size is then capped by
+  # `max_single_token_cap_fraction` (smaller than the normal cap because
+  # the curve hasn't yet confirmed liquidity).
+  early_conviction:
+    enabled: false
+    window_seconds: 30
+    min_kol_touches: 2
+    min_prior_graduations: 1
+    max_single_token_cap_fraction: 0.03
 
 # ── Filters ───────────────────────────────────────────────────────────────
 filters:
@@ -100,6 +139,22 @@ filters:
     # Minimum days since launch (avoid sniping fresh failures).
     min_days_since_launch: 3
 
+  # v0.3 creator-vault alignment filter. Reads the on-chain creator field
+  # added to the BondingCurve account in pump.fun's May 2025 protocol
+  # upgrade. Never hard-rejects; nudges the score based on creator
+  # history:
+  #   - aligned (>= min_prior_graduations_for_bonus prior wins) → 80
+  #   - anonymous (no creator data, or 0 prior tokens) → 50
+  #   - suspect (many prior tokens, none graduated) → 20
+  creator_vault:
+    enabled: false                     # default off; opt-in v0.3 feature
+    min_prior_graduations_for_bonus: 1
+    # Penalty trigger: launched >= N tokens in 7d with zero graduations.
+    suspect_if_dev_token_count_7d_gte: 25
+    score_aligned: 80
+    score_anonymous: 50
+    score_suspect: 20
+
 # ── Execution / exit ladder ───────────────────────────────────────────────
 execution:
   # Slippage simulated in paper mode.
@@ -120,8 +175,10 @@ execution:
   #   - every buy succeeds (no slippage-exceeded / blockhash-expired fails)
   paper_realism:
     enabled: true
-    # Pump.fun protocol fee (bps of notional). 100 bps = 1% per side.
-    pump_fee_bps: 100
+    # Pump.fun protocol fee (bps of notional). 125 bps = 1.25% per side
+    # per pump.fun's own docs as of 7 Oct 2025 (was 100 bps before then).
+    # Split: 30 bps creator vault + 95 bps protocol.
+    pump_fee_bps: 125
     # Priority fee distribution (lamports). p50/p99 sampled per fill.
     priority_fee_lamports_p50: 50000
     priority_fee_lamports_p99: 300000
@@ -150,6 +207,12 @@ exits:
 watch:
   # Subscribe to pump.fun program signatures via gRPC (preferred) or HTTP poll.
   use_grpc_if_available: true
+  # v0.3: when true AND env var SOLANA_HELIUS_WS_URL is set, the bot uses
+  # Helius's free logsSubscribe WebSocket (~200 ms latency per Helius's
+  # own docs) and ignores http_poll_interval_seconds. If the WS connection
+  # fails, the bot reconnects with backoff and (after enough failures)
+  # falls back to HTTP polling.
+  use_helius_ws_if_available: true
   http_poll_interval_seconds: 5
   # Discard tokens older than this on first sighting (avoid backfill spam).
   max_token_age_seconds_on_first_sight: 120

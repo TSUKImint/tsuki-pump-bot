@@ -30,6 +30,7 @@ from .execution.position_monitor import Position, PositionMonitor
 from .filters import (
     BundleDetector,
     ConvergenceDetector,
+    CreatorVaultFilter,
     CtoDetector,
     CurvePredictor,
     DevBlacklist,
@@ -44,10 +45,12 @@ from .orchestrator import (
     run_scoring_loop,
     run_scout_loop,
 )
-from .scoring import CompositeScorer
+from .scoring import CompositeScorer, GraduationProbabilityScorer, build_scorer
 from .scout.aggregator import TokenStateAggregator
+from .scout.helius_ws_scout import HeliusWebsocketScout
 from .scout.pump_scout import PumpScout
 from .solana.rpc import SolanaRPCClient
+from .strategy_profile import apply_aggressive_overrides
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -191,6 +194,28 @@ async def _async_main(args: argparse.Namespace) -> int:
         logger.error("config.load_failed", err=str(exc))
         return 2
 
+    # v0.3: apply aggressive-paper overrides BEFORE anything else reads
+    # config, so every component sees the effective values.
+    config, effective_profile = apply_aggressive_overrides(config)
+    if effective_profile.aggressive_enabled:
+        logger.info(
+            "strategy.aggressive_profile_enabled",
+            enter_threshold=effective_profile.enter_threshold,
+            fraction_of_kelly=effective_profile.fraction_of_kelly,
+            min_expected_roi=effective_profile.min_expected_roi,
+            single_token_cap_fraction=effective_profile.single_token_cap_fraction,
+            curve_entry_sol=effective_profile.enter_after_sol_in_curve_gte,
+            poll_seconds=effective_profile.http_poll_interval_seconds,
+            scoring_cycle_seconds=effective_profile.scoring_cycle_seconds,
+        )
+    if effective_profile.early_conviction_enabled:
+        logger.info(
+            "strategy.early_conviction_enabled",
+            window_seconds=config.scoring.early_conviction.window_seconds,
+            min_kol_touches=config.scoring.early_conviction.min_kol_touches,
+            min_prior_graduations=config.scoring.early_conviction.min_prior_graduations,
+        )
+
     kill = KillSwitch()
     loop = asyncio.get_running_loop()
     _install_signal_handlers(loop, kill, logger)
@@ -228,7 +253,8 @@ async def _run(
 ) -> int:
     risk = build_risk_engine(config)
     aggregator = TokenStateAggregator()
-    composite_scorer = CompositeScorer(config.scoring)
+    composite_scorer: CompositeScorer | GraduationProbabilityScorer = build_scorer(config.scoring)
+    logger.info("scoring.mode", mode=config.scoring.mode)
     paper_executor = PaperExecutor(
         slippage_bps=config.execution.paper_slippage_bps,
         realism=config.execution.paper_realism,
@@ -243,8 +269,11 @@ async def _run(
     )
     curve_predictor = CurvePredictor(config.filters.curve_graduation)
     cto_detector = CtoDetector(config.filters.cto_revival)
+    creator_vault_filter = CreatorVaultFilter(config.filters.creator_vault)
 
     open_positions: dict[str, Position] = {}
+    # FirstKolTouch loaded the KOL CSV; reuse that set for early-conviction.
+    kol_wallets = first_kol_touch.kol_wallets()
 
     ctx = OrchestratorContext(
         settings=settings,
@@ -263,6 +292,7 @@ async def _run(
         convergence=convergence,
         curve_predictor=curve_predictor,
         cto_detector=cto_detector,
+        creator_vault_filter=creator_vault_filter,
         started_at=datetime.now(tz=UTC),
         open_positions=open_positions,
         paper_trader_enabled=args.paper_trader
@@ -271,6 +301,7 @@ async def _run(
             "paper-mock",
             "paper",
         },
+        kol_wallets=kol_wallets,
     )
 
     await event_store.record_event(
@@ -345,8 +376,14 @@ async def _run(
     # ── Run the live system ──────────────────────────────────────────────
     tasks: list[asyncio.Task[object]] = []
 
+    # When the aggressive profile is enabled, score+enter twice as often.
+    scoring_cycle_seconds = (
+        config.scoring.aggressive_paper.scoring_cycle_seconds
+        if config.scoring.aggressive_paper.enabled
+        else 5.0
+    )
     scoring_task = asyncio.create_task(
-        run_scoring_loop(ctx, _publish, cycle_seconds=5.0),
+        run_scoring_loop(ctx, _publish, cycle_seconds=scoring_cycle_seconds),
         name="scoring",
     )
     tasks.append(scoring_task)
@@ -365,11 +402,32 @@ async def _run(
         )
         await rpc.__aenter__()  # entered manually so we can cancel cleanly
         try:
-            scout = PumpScout(
-                rpc,
-                poll_interval_seconds=config.watch.http_poll_interval_seconds,
-                stop_event=asyncio.Event(),
-            )
+            scout: PumpScout | HeliusWebsocketScout
+            if config.watch.use_helius_ws_if_available and settings.helius_ws_url:
+                logger.info(
+                    "scout.transport",
+                    transport="helius_ws",
+                    url_host=settings.helius_ws_url.split("?", 1)[0],
+                )
+                scout = HeliusWebsocketScout(
+                    rpc,
+                    settings.helius_ws_url,
+                    connect_timeout_seconds=config.network.http_timeout_seconds,
+                    ping_interval_seconds=config.network.ws_ping_interval_seconds,
+                    reconnect_max_backoff_seconds=(config.network.ws_reconnect_max_backoff_seconds),
+                    stop_event=asyncio.Event(),
+                )
+            else:
+                logger.info(
+                    "scout.transport",
+                    transport="http_poll",
+                    poll_seconds=config.watch.http_poll_interval_seconds,
+                )
+                scout = PumpScout(
+                    rpc,
+                    poll_interval_seconds=config.watch.http_poll_interval_seconds,
+                    stop_event=asyncio.Event(),
+                )
             # Pump scout stats publish into dashboard via shared reference.
             dash_state.scout_stats = scout.stats
 

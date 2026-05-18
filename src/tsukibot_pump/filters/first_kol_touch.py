@@ -51,6 +51,14 @@ class FirstKolTouch:
             path=str(config.kol_csv_path),
         )
 
+    def kol_wallets(self) -> frozenset[str]:
+        """Return the set of known KOL wallets.
+
+        Used by the v0.3 early-conviction lane to count KOL touches inside
+        the first window-seconds after token CREATE.
+        """
+        return frozenset(self._kols.keys())
+
     @staticmethod
     def _load(path: Path) -> dict[str, KolEntry]:
         """Load KOL list from CSV: wallet,label,score (or wallet,label)."""

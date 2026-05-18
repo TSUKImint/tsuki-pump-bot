@@ -33,20 +33,26 @@ from .execution.position_monitor import ExitAction, Position, PositionMonitor
 from .filters import (
     BundleDetector,
     ConvergenceDetector,
+    CreatorVaultFilter,
     CtoDetector,
     CurvePredictor,
     DevBlacklist,
     FirstKolTouch,
 )
 from .models import FilterOutcome, TokenState
-from .scoring import CompositeScorer
+from .scoring import CompositeScorer, GraduationProbabilityScorer
 from .scout.aggregator import TokenStateAggregator
+from .scout.helius_ws_scout import HeliusWebsocketScout
 from .scout.pump_scout import PumpScout
 from .solana.bonding_curve import (
     DEFAULT_VIRTUAL_SOL_RESERVES,
     DEFAULT_VIRTUAL_TOKEN_RESERVES,
     LAMPORTS_PER_SOL,
     BondingCurveState,
+)
+from .strategy_profile import (
+    early_conviction_cap_sol,
+    is_early_conviction_signal,
 )
 
 logger = structlog.get_logger(__name__)
@@ -67,7 +73,7 @@ class OrchestratorContext:
     telegram: TelegramClient
     risk: RiskEngine
     aggregator: TokenStateAggregator
-    composite_scorer: CompositeScorer
+    composite_scorer: CompositeScorer | GraduationProbabilityScorer
     paper_executor: PaperExecutor
     position_monitor: PositionMonitor
     dev_blacklist: DevBlacklist
@@ -76,9 +82,13 @@ class OrchestratorContext:
     convergence: ConvergenceDetector
     curve_predictor: CurvePredictor
     cto_detector: CtoDetector
+    creator_vault_filter: CreatorVaultFilter
     started_at: datetime
     open_positions: dict[str, Position]
     paper_trader_enabled: bool
+    # v0.3: KOL wallets the orchestrator uses for the early-conviction lane.
+    # Sourced from the FirstKolTouch CSV at startup.
+    kol_wallets: frozenset[str] = frozenset()
 
 
 def build_risk_engine(config: Config) -> RiskEngine:
@@ -137,9 +147,13 @@ async def run_position_loop(
 
 async def run_scout_loop(
     ctx: OrchestratorContext,
-    scout: PumpScout,
+    scout: PumpScout | HeliusWebsocketScout,
 ) -> None:
-    """Drain the firehose and feed events into the aggregator."""
+    """Drain the firehose and feed events into the aggregator.
+
+    Accepts either the HTTP-polling `PumpScout` or the WebSocket
+    `HeliusWebsocketScout`; both produce the same `PumpEvent` stream.
+    """
     async for event in scout.stream():
         if ctx.kill.tripped:
             break
@@ -186,11 +200,30 @@ async def _score_once(ctx: OrchestratorContext) -> None:
             continue
         if composite.hard_rejected:
             continue
-        if not composite.enter:
-            continue
         if token.mint in ctx.open_positions:
             continue
-        await _try_open_position(ctx, token, composite_score=composite.score)
+
+        # v0.3 early-conviction lane: bypass the composite gate when the
+        # token has on-chain creator history *and* >= N KOL touches in the
+        # first window-seconds after CREATE. Still subject to dev_blacklist
+        # hard-reject (which is checked above).
+        ec = ctx.config.scoring.early_conviction
+        early_conviction = ec.enabled and is_early_conviction_signal(
+            token,
+            kol_wallets=set(ctx.kol_wallets),
+            window_seconds=ec.window_seconds,
+            min_kol_touches=ec.min_kol_touches,
+            min_prior_graduations=ec.min_prior_graduations,
+        )
+
+        if not composite.enter and not early_conviction:
+            continue
+        await _try_open_position(
+            ctx,
+            token,
+            composite_score=composite.score,
+            early_conviction=early_conviction,
+        )
 
 
 async def _run_filters(
@@ -201,6 +234,12 @@ async def _run_filters(
     outcomes: list[FilterOutcome] = []
 
     dev_token_count_24h, dev_token_count_7d = await _dev_token_counts(ctx, token.dev_wallet)
+    # Propagate the dev-token-count to creator stats for the creator-vault
+    # filter (in-memory proxy; the source of truth in v0.4 will be the
+    # on-chain creator-vault PDA, populated by BondingCurveReader).
+    if not token.creator_tokens_7d:
+        token.creator_tokens_7d = dev_token_count_7d
+
     outcomes.append(
         ctx.dev_blacklist.evaluate(
             token,
@@ -219,6 +258,7 @@ async def _run_filters(
             unique_buyers_24h=token.distinct_buyers_60s,  # crude proxy in v0.2
         )
     )
+    outcomes.append(ctx.creator_vault_filter.evaluate(token))
     return outcomes
 
 
@@ -262,18 +302,27 @@ async def _try_open_position(
     token: TokenState,
     *,
     composite_score: float,
+    early_conviction: bool = False,
 ) -> None:
-    """Size + paper-fill a buy for `token`. No-op if any gate refuses."""
+    """Size + paper-fill a buy for `token`. No-op if any gate refuses.
+
+    `early_conviction=True` triggers the lane-specific cap (a tighter
+    single-token cap; never larger than the bankroll's normal cap).
+    """
     cost_per_unit = max(1e-12, token.last_price_sol_per_token)
+    single_token_cap_sol = (
+        ctx.config.bankroll.total_sol * ctx.config.bankroll.single_token_cap_fraction
+    )
+    if early_conviction:
+        ec_cap = early_conviction_cap_sol(ctx.config, ctx.config.bankroll.total_sol)
+        single_token_cap_sol = min(single_token_cap_sol, ec_cap)
     inputs = SizingInputs(
         bankroll_sol=ctx.config.bankroll.total_sol,
         composite_score=composite_score,
         cost_per_unit_sol=cost_per_unit,
         fraction_of_kelly=ctx.config.sizing.fraction_of_kelly,
         hard_cap_per_trade_sol=ctx.config.sizing.hard_cap_per_trade_sol,
-        single_token_cap_sol=(
-            ctx.config.bankroll.total_sol * ctx.config.bankroll.single_token_cap_fraction
-        ),
+        single_token_cap_sol=single_token_cap_sol,
     )
     sizing = size_memecoin_position(inputs)
     if sizing.units <= 0 or sizing.notional_sol <= 0:

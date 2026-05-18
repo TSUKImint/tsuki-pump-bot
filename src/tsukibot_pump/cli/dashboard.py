@@ -15,7 +15,7 @@ import asyncio
 from collections import deque
 from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Protocol
 
 from rich.console import Console, Group
 from rich.layout import Layout
@@ -31,11 +31,27 @@ from ..models import TokenState
 from ..scout.pump_scout import ScoutStats
 
 
+class _ScoutStatsProto(Protocol):
+    """Structural type for any scout-stats object the dashboard renders.
+
+    Lets the dashboard accept either `ScoutStats` (HTTP-poll) or
+    `HeliusScoutStats` (WS) without importing both.
+    """
+
+    signatures_seen: int
+    transactions_parsed: int
+    create_events: int
+    buy_events: int
+    sell_events: int
+    rpc_errors: int
+    last_signature: str
+
+
 class DashboardState:
     """Shared, mutable view exposed to the dashboard by the orchestrator."""
 
     def __init__(self, *, max_recent_events: int = 50) -> None:
-        self.scout_stats: ScoutStats = ScoutStats()
+        self.scout_stats: _ScoutStatsProto = ScoutStats()
         self.top_tokens: list[TokenState] = []
         self.open_positions: dict[str, Position] = {}
         self.current_prices: dict[str, float] = {}
