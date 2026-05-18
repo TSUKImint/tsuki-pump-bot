@@ -110,6 +110,30 @@ execution:
   # Max compute units we'll request per swap tx.
   cu_limit: 600000
 
+  # ── Paper realism layer (PR #C) ────────────────────────────────────────
+  # Off by default for backwards-compat. Turn on once you want paper P&L
+  # that's comparable to mainnet P&L. Without it paper mode looks rosier
+  # than it should because:
+  #   - the curve is treated as frozen between detection and fill
+  #   - pump.fun's 1% trade fee is ignored
+  #   - priority fees aren't charged
+  #   - every buy succeeds (no slippage-exceeded / blockhash-expired fails)
+  paper_realism:
+    enabled: true
+    # Pump.fun protocol fee (bps of notional). 100 bps = 1% per side.
+    pump_fee_bps: 100
+    # Priority fee distribution (lamports). p50/p99 sampled per fill.
+    priority_fee_lamports_p50: 50000
+    priority_fee_lamports_p99: 300000
+    # End-to-end latency distribution (ms). p50/p99 sampled per fill.
+    end_to_end_latency_ms_p50: 1500
+    end_to_end_latency_ms_p99: 5000
+    # Probability that a paper buy / sell fails outright.
+    buy_fail_prob: 0.10
+    sell_fail_prob: 0.05
+    # Set to an int for deterministic paper runs (useful for backtests).
+    # rng_seed: 42
+
 exits:
   # Profit ladder: at each multiple of entry, sell the listed fraction.
   ladder:

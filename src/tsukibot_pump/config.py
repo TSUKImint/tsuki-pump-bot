@@ -183,10 +183,42 @@ class FiltersConfig(BaseModel):
     cto_revival: CtoRevivalConfig
 
 
+class PaperRealismConfig(BaseModel):
+    """Tunables that make paper fills resemble live fills.
+
+    Defaults are calibrated against publicly documented pump.fun trade fees
+    (1% per side as of 2025-2026) and Helius / QuickNode latency studies. The
+    point is *not* perfect calibration — it's making paper P&L pessimistic
+    enough that mainnet doesn't surprise the user later.
+    """
+
+    enabled: bool = False
+    # Pump.fun protocol fee (bps of notional, applied on every buy and sell).
+    pump_fee_bps: float = Field(default=100.0, ge=0, le=10_000)
+    # Independent priority fee (in lamports of SOL, added to buy cost / deducted
+    # from sell proceeds — separate from the priority_fee_micro_lamports knob
+    # used by the live executor planner).
+    priority_fee_lamports_p50: int = Field(default=50_000, ge=0)
+    priority_fee_lamports_p99: int = Field(default=300_000, ge=0)
+    # End-to-end latency (detection → landed slot), in milliseconds. Used to
+    # model curve drift between when we observed the price and when our tx
+    # would have landed.
+    end_to_end_latency_ms_p50: float = Field(default=1_500.0, ge=0)
+    end_to_end_latency_ms_p99: float = Field(default=5_000.0, ge=0)
+    # Probability that a paper buy / sell "fails" (slippage tolerance exceeded
+    # or blockhash expired). Modelled as a Bernoulli draw per attempt.
+    buy_fail_prob: float = Field(default=0.10, ge=0, le=1)
+    sell_fail_prob: float = Field(default=0.05, ge=0, le=1)
+    # Optional deterministic seed for tests / reproducible paper runs. None
+    # means "use process-default RNG".
+    rng_seed: int | None = None
+
+
 class ExecutionConfig(BaseModel):
     paper_slippage_bps: float = Field(ge=0)
     priority_fee_micro_lamports: int = Field(ge=0)
     cu_limit: int = Field(ge=10_000)
+    paper_realism: PaperRealismConfig = Field(default_factory=PaperRealismConfig)
 
 
 class ExitLadderStep(BaseModel):

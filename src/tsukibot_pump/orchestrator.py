@@ -290,8 +290,14 @@ async def _try_open_position(
         return
 
     curve = _synthesize_curve_from_token(token)
+    inflow_sol_per_sec = max(0.0, token.last_sol_velocity_sol_per_min) / 60.0
     try:
-        fill = ctx.paper_executor.buy(token.mint, sizing.units, curve)
+        fill = ctx.paper_executor.buy(
+            token.mint,
+            sizing.units,
+            curve,
+            observed_inflow_sol_per_sec=inflow_sol_per_sec,
+        )
     except ValueError as exc:
         await ctx.event_store.record_event(
             kind="paper.buy_failed",
@@ -395,8 +401,14 @@ async def _execute_exit(
 ) -> None:
     """Run a paper sell for `action.units_to_sell`."""
     curve = _synthesize_curve_from_token(token)
+    inflow_sol_per_sec = max(0.0, token.last_sol_velocity_sol_per_min) / 60.0
     try:
-        fill: PaperFill = ctx.paper_executor.sell(token.mint, action.units_to_sell, curve)
+        fill: PaperFill = ctx.paper_executor.sell(
+            token.mint,
+            action.units_to_sell,
+            curve,
+            observed_inflow_sol_per_sec=inflow_sol_per_sec,
+        )
     except ValueError as exc:
         await ctx.event_store.record_event(
             kind="paper.sell_failed",
