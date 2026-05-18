@@ -229,7 +229,10 @@ async def _run(
     risk = build_risk_engine(config)
     aggregator = TokenStateAggregator()
     composite_scorer = CompositeScorer(config.scoring)
-    paper_executor = PaperExecutor(slippage_bps=config.execution.paper_slippage_bps)
+    paper_executor = PaperExecutor(
+        slippage_bps=config.execution.paper_slippage_bps,
+        realism=config.execution.paper_realism,
+    )
     position_monitor = PositionMonitor(config.exits)
 
     dev_blacklist = DevBlacklist(config.filters.dev_blacklist)
