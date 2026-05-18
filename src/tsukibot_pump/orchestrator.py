@@ -16,9 +16,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import Protocol
 
 import structlog
 
@@ -41,13 +42,13 @@ from .filters import (
 from .models import FilterOutcome, TokenState
 from .scoring import CompositeScorer
 from .scout.aggregator import TokenStateAggregator
-from .scout.pump_scout import PumpScout
 from .solana.bonding_curve import (
     DEFAULT_VIRTUAL_SOL_RESERVES,
     DEFAULT_VIRTUAL_TOKEN_RESERVES,
     LAMPORTS_PER_SOL,
     BondingCurveState,
 )
+from .solana.pump_program import PumpEvent
 
 logger = structlog.get_logger(__name__)
 
@@ -135,9 +136,19 @@ async def run_position_loop(
             await asyncio.wait_for(ctx.kill.wait_for_trip(), timeout=cycle_seconds)
 
 
+class _EventStreamLike(Protocol):
+    """Anything with an async ``stream()`` of :class:`PumpEvent`s.
+
+    Covers :class:`PumpScout` (live RPC) plus the firehose recorder /
+    replayer used for backtests — the orchestrator doesn't care which.
+    """
+
+    def stream(self) -> AsyncIterator[PumpEvent]: ...
+
+
 async def run_scout_loop(
     ctx: OrchestratorContext,
-    scout: PumpScout,
+    scout: _EventStreamLike,
 ) -> None:
     """Drain the firehose and feed events into the aggregator."""
     async for event in scout.stream():

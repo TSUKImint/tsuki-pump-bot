@@ -16,6 +16,7 @@ import signal
 import sys
 from collections.abc import Callable
 from datetime import UTC, datetime
+from pathlib import Path
 
 import structlog
 
@@ -35,6 +36,7 @@ from .filters import (
     DevBlacklist,
     FirstKolTouch,
 )
+from .firehose import FirehoseRecorder, FirehoseReplayer, ReplaySpeedMode
 from .logging import configure_logging, get_logger
 from .models import TokenState
 from .orchestrator import (
@@ -91,6 +93,33 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--i-understand-this-trades-real-money",
         action="store_true",
         help="Required for devnet / mainnet modes (alongside an explicit --mode).",
+    )
+    parser.add_argument(
+        "--replay-firehose",
+        type=Path,
+        default=None,
+        help=(
+            "Backtest mode: replay a recorded JSONL firehose instead of "
+            "connecting to RPC. Disables the dashboard and any live exec."
+        ),
+    )
+    parser.add_argument(
+        "--replay-speed",
+        choices=[m.value for m in ReplaySpeedMode],
+        default=ReplaySpeedMode.ASAP.value,
+        help="Replay speed mode (default: asap — deterministic, no sleeps).",
+    )
+    parser.add_argument(
+        "--replay-multiplier",
+        type=float,
+        default=60.0,
+        help="Speed multiplier for 'compressed' replay mode (default 60x).",
+    )
+    parser.add_argument(
+        "--record-firehose",
+        type=Path,
+        default=None,
+        help="Live mode: also write every observed event to this JSONL path.",
     )
     return parser.parse_args(argv)
 
@@ -357,7 +386,37 @@ async def _run(
     )
     tasks.append(position_task)
 
-    if settings.is_live_chain:
+    if args.replay_firehose is not None:
+        # Backtest mode: yield events from a recorded JSONL instead of RPC.
+        # No RPC connection, no Telegram, no live exec — just the same
+        # scoring + paper-trading pipeline driven by a deterministic feed.
+        if not args.replay_firehose.exists():
+            logger.error("tsuki-pump.replay_file_missing", path=str(args.replay_firehose))
+            return 2
+        replay_stop = asyncio.Event()
+        replayer = FirehoseReplayer(
+            args.replay_firehose,
+            mode=args.replay_speed,
+            speed_multiplier=args.replay_multiplier,
+            stop_event=replay_stop,
+        )
+        scout_task = asyncio.create_task(run_scout_loop(ctx, replayer), name="replay")
+        tasks.append(scout_task)
+        if dashboard is not None:
+            dash_task = asyncio.create_task(dashboard.run_forever(), name="dashboard")
+            tasks.append(dash_task)
+        try:
+            # Stop when either the replay is exhausted or the kill switch
+            # trips. We don't want one to keep the bot alive after the
+            # other has decided to shut down.
+            done, _pending = await asyncio.wait(
+                {scout_task, asyncio.create_task(kill.wait_for_trip(), name="kill_wait")},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            _ = done
+        finally:
+            replay_stop.set()
+    elif settings.is_live_chain:
         rpc = SolanaRPCClient(
             settings.effective_rpc_url,
             http_timeout_seconds=config.network.http_timeout_seconds,
@@ -365,15 +424,25 @@ async def _run(
         )
         await rpc.__aenter__()  # entered manually so we can cancel cleanly
         try:
-            scout = PumpScout(
+            base_scout = PumpScout(
                 rpc,
                 poll_interval_seconds=config.watch.http_poll_interval_seconds,
                 stop_event=asyncio.Event(),
             )
             # Pump scout stats publish into dashboard via shared reference.
-            dash_state.scout_stats = scout.stats
+            dash_state.scout_stats = base_scout.stats
 
-            scout_task = asyncio.create_task(run_scout_loop(ctx, scout), name="scout")
+            scout_source: PumpScout | FirehoseRecorder
+            if args.record_firehose is not None:
+                scout_source = FirehoseRecorder(base_scout, output_path=args.record_firehose)
+                logger.info(
+                    "tsuki-pump.record_firehose_enabled",
+                    out=str(args.record_firehose),
+                )
+            else:
+                scout_source = base_scout
+
+            scout_task = asyncio.create_task(run_scout_loop(ctx, scout_source), name="scout")
             tasks.append(scout_task)
 
             if dashboard is not None:
