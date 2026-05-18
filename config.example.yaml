@@ -1,0 +1,158 @@
+# tsuki-pump-bot — strategy thresholds (commit-safe, no secrets).
+# Copy to config.yaml and tune. The bot reads this file at startup.
+
+# ── Capital + risk ────────────────────────────────────────────────────────
+bankroll:
+  # Paper SOL bankroll (also used for sizing in mainnet mode as upper bound).
+  total_sol: 10.0
+
+  # Max position per token, as fraction of bankroll.
+  single_token_cap_fraction: 0.05      # 5%
+
+  # Daily and total drawdown limits (fraction of starting bankroll).
+  # Bot trips kill switch when crossed.
+  daily_drawdown_kill: 0.10            # 10%
+  total_drawdown_kill: 0.25            # 25%
+
+  # Max parallel open positions.
+  max_open_positions: 12
+
+# ── Sizing (fractional Kelly for directional bets) ────────────────────────
+sizing:
+  fraction_of_kelly: 0.20              # quarter-Kelly equivalent
+  min_expected_roi: 0.30               # skip <30% expected upside
+  # Hard cap per-trade in SOL, regardless of Kelly output.
+  hard_cap_per_trade_sol: 0.5
+
+# ── Scoring threshold ─────────────────────────────────────────────────────
+scoring:
+  # Composite score in [0, 100]. We enter a paper position only when score
+  # is at or above this gate.
+  enter_threshold: 60
+  # In watchtower mode we still log everything; this only gates the paper
+  # executor.
+  enter_threshold_watchtower_log: 40
+
+  # Individual filter weights (must sum to 1.0).
+  weights:
+    dev_blacklist: 0.20                # negative-only filter, hard-fails if rugger
+    bundle_cluster: 0.15
+    first_kol_touch: 0.20
+    convergence: 0.15
+    curve_graduation: 0.20
+    cto_revival: 0.10
+
+# ── Filters ───────────────────────────────────────────────────────────────
+filters:
+  dev_blacklist:
+    enabled: true
+    # Hard-reject if creator wallet is on the blacklist OR has launched
+    # >= this many tokens in the past N days.
+    reject_if_known_rugger: true
+    reject_if_dev_token_count_24h_gte: 5
+    reject_if_dev_token_count_7d_gte: 15
+    # Local path to a CSV of known scammer wallets (one per line). We seed
+    # with the AllenHark public DB; user can add more.
+    blacklist_csv_path: data/scammer_wallets.csv
+
+  bundle_cluster:
+    enabled: true
+    # Reject if first-N-buyer concentration > this fraction in a single cluster.
+    reject_cluster_concentration_gte: 0.30
+    # First N buyers we analyze.
+    first_n_buyers: 50
+    # Treat buyers in the same Solana slot as a bundle.
+    bundle_window_slots: 1
+
+  first_kol_touch:
+    enabled: true
+    # Boost score if a tracked top-decile KOL was among the first N buyers.
+    first_n_buyers: 20
+    # Path to private KOL leaderboard (CSV: wallet, label, score).
+    kol_csv_path: data/private_kol_list.csv
+    # Score given per KOL touch (clamped at max_kol_touches).
+    score_per_touch: 25
+    max_kol_touches: 3
+
+  convergence:
+    enabled: true
+    # When 2+ tracked KOLs buy the same token within this window.
+    window_seconds: 600
+    min_distinct_kols: 2
+    score_at_minimum: 60
+    score_per_extra_kol: 15
+
+  curve_graduation:
+    enabled: true
+    # Bonding curve in SOL. Graduation occurs at ~85 SOL.
+    enter_after_sol_in_curve_gte: 65
+    # Required curve velocity over the last N seconds (SOL/min).
+    min_velocity_sol_per_min: 0.5
+    # Required minimum buyers in last 60s (filters one-wallet pumps).
+    min_distinct_buyers_60s: 8
+
+  cto_revival:
+    enabled: true
+    # Days since dev wallet last activity to be "abandoned".
+    dev_silent_min_days: 2
+    # Unique daily buyers floor (post-abandonment) to count as "revived".
+    min_unique_buyers_24h: 30
+    # Minimum days since launch (avoid sniping fresh failures).
+    min_days_since_launch: 3
+
+# ── Execution / exit ladder ───────────────────────────────────────────────
+execution:
+  # Slippage simulated in paper mode.
+  paper_slippage_bps: 75               # 0.75% taker on Solana DEX is realistic
+  # Priority fee budget (micro-lamports per CU). Higher → faster inclusion
+  # in busy blocks. Only used in devnet/mainnet modes.
+  priority_fee_micro_lamports: 50000
+  # Max compute units we'll request per swap tx.
+  cu_limit: 600000
+
+exits:
+  # Profit ladder: at each multiple of entry, sell the listed fraction.
+  ladder:
+    - { roi: 1.0, sell_fraction: 0.50 }      # +100% → sell half
+    - { roi: 3.0, sell_fraction: 0.30 }      # +300% → sell another 30%
+    # remaining 20% rides with trailing stop
+  trailing_stop_pct: 0.40              # 40% trailing stop on residual
+  # Hard exit if dev wallet moves > this fraction of their balance.
+  dev_drain_exit_fraction: 0.10
+  # Hard exit if price drops > this from entry (overrides trailing).
+  hard_stop_loss_pct: 0.50
+
+# ── Watch sources ─────────────────────────────────────────────────────────
+watch:
+  # Subscribe to pump.fun program signatures via gRPC (preferred) or HTTP poll.
+  use_grpc_if_available: true
+  http_poll_interval_seconds: 5
+  # Discard tokens older than this on first sighting (avoid backfill spam).
+  max_token_age_seconds_on_first_sight: 120
+
+# ── Network ───────────────────────────────────────────────────────────────
+network:
+  http_timeout_seconds: 15.0
+  ws_ping_interval_seconds: 20.0
+  ws_reconnect_max_backoff_seconds: 60.0
+  # Per-host rate limits to be a good citizen.
+  rpc_requests_per_second: 8
+
+# ── Telegram notification toggles ─────────────────────────────────────────
+telegram:
+  notify_on_entry: true
+  notify_on_exit: true
+  notify_on_kill_switch: true
+  notify_on_anomaly: true               # dev drain, score regime change, etc.
+  notify_on_high_score: true            # any token scoring >= enter_threshold
+  daily_digest: true
+  daily_digest_utc_hour: 22
+
+# ── Dashboard ─────────────────────────────────────────────────────────────
+dashboard:
+  refresh_hz: 4
+
+# ── Event store ───────────────────────────────────────────────────────────
+event_store:
+  sqlite_path: ./state/events.db
+  jsonl_audit_path: ./state/audit.jsonl

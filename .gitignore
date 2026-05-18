@@ -1,0 +1,48 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+*.egg-info/
+*.egg
+build/
+dist/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+coverage.xml
+.tox/
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
+
+# Secrets — never commit
+.env
+.env.local
+.env.*.local
+wallets.json
+*.keypair.json
+
+# Runtime state — never commit
+state/
+*.db
+*.db-journal
+*.jsonl
+*.log
+nohup.out
+test-evidence/
+
+# Local config overrides
+config.yaml
+config.local.yaml
